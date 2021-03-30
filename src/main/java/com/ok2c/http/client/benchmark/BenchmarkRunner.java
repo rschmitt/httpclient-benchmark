@@ -146,21 +146,6 @@ public class BenchmarkRunner {
             System.out.println("=================================");
             System.out.println("HTTP agent: " + agent.getClientName());
             System.out.println("=================================");
-            System.out.println("warming up...");
-
-            int warmup = config.getRequests() / 100;
-            if (warmup > 100) {
-                warmup = 100;
-            }
-
-            agent.execute(BenchmarkConfig.copy(config)
-                    .setRequests(warmup)
-                    .setConcurrency(2)
-                    .build());
-            // Sleep a little
-            Thread.sleep(5000);
-
-            System.out.println("---------------------------------");
 
             if (config.getFile() != null) {
                 System.out.println(config.getRequests() + " PUT requests");

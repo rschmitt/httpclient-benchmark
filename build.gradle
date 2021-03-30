@@ -37,8 +37,8 @@ dependencies {
 }
 
 def targetUri = project.hasProperty('benchmark.target-uri') ? project.'benchmark.target-uri' : null
-def n = project.hasProperty('benchmark.requests') ? project.'benchmark.requests' : 2000
-def c = project.hasProperty('benchmark.concurrency') ? project.'benchmark.concurrency' : 2
+def n = project.hasProperty('benchmark.requests') ? project.'benchmark.requests' : 12800
+def c = project.hasProperty('benchmark.concurrency') ? project.'benchmark.concurrency' : 64
 def content = project.hasProperty('benchmark.content-file') ? project.'benchmark.content-file' : null
 def contentType = project.hasProperty('benchmark.content-type') ? project.'benchmark.content-type' : 'text/plain'
 def useEmbeddedServer = false
@@ -67,14 +67,7 @@ task benchmark(dependsOn: 'classes') {
     doLast {
 
         def agents = [
-                'JREHttpUrlConnection',
-                'ApacheHttpClientV3',
-                'ApacheHttpClientV4',
-                'ApacheHttpClientV5',
-                'JRE11HttpClient',
-                'JettyHttpClientV9',
-                'ApacheHttpAsyncClientV4',
-                'ApacheHttpAsyncClientV5',
+                'ApacheHttpClientV5'
         ]
 
         def params = ['-n', "${n}", '-c', "${c}", '-k']

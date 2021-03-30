@@ -15,38 +15,39 @@
  */
 package com.ok2c.http.client.benchmark;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.net.URI;
-
+import org.apache.hc.client5.http.classic.methods.HttpGet;
+import org.apache.hc.client5.http.classic.methods.HttpUriRequestBase;
 import org.apache.hc.client5.http.config.RequestConfig;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpResponse;
-import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
 import org.apache.hc.client5.http.impl.io.DefaultHttpResponseParserFactory;
 import org.apache.hc.client5.http.impl.io.ManagedHttpClientConnectionFactory;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
 import org.apache.hc.client5.http.protocol.HttpClientContext;
-import org.apache.hc.core5.http.ClassicHttpRequest;
-import org.apache.hc.core5.http.ContentType;
-import org.apache.hc.core5.http.HeaderElements;
-import org.apache.hc.core5.http.HttpEntity;
-import org.apache.hc.core5.http.HttpHeaders;
 import org.apache.hc.core5.http.HttpHost;
 import org.apache.hc.core5.http.config.CharCodingConfig;
 import org.apache.hc.core5.http.config.Http1Config;
-import org.apache.hc.core5.http.io.SocketConfig;
-import org.apache.hc.core5.http.io.entity.FileEntity;
-import org.apache.hc.core5.http.io.support.ClassicRequestBuilder;
 import org.apache.hc.core5.io.CloseMode;
+import org.apache.hc.core5.pool.PoolConcurrencyPolicy;
+import org.apache.hc.core5.pool.PoolReusePolicy;
 import org.apache.hc.core5.util.Timeout;
 import org.apache.hc.core5.util.VersionInfo;
+
+import java.net.URI;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class ApacheHttpClientV5 implements HttpAgent {
 
     private final PoolingHttpClientConnectionManager mgr;
     private final CloseableHttpClient httpclient;
+    private final ScheduledExecutorService executorService = Executors.newScheduledThreadPool(10);
 
     public ApacheHttpClientV5() {
         super();
@@ -58,8 +59,14 @@ public class ApacheHttpClientV5 implements HttpAgent {
                                 .build(),
                         CharCodingConfig.DEFAULT,
                         DefaultHttpResponseParserFactory.INSTANCE))
+                .setMaxConnPerRoute(8)
+                .setMaxConnTotal(8)
+                .setPoolConcurrencyPolicy(PoolConcurrencyPolicy.STRICT)
+                .setConnPoolPolicy(PoolReusePolicy.FIFO)
                 .build();
-        this.httpclient = HttpClients.createMinimal(this.mgr);
+        this.httpclient = HttpClientBuilder.create()
+                .setConnectionManager(this.mgr)
+                .build();
     }
 
     @Override
@@ -68,100 +75,73 @@ public class ApacheHttpClientV5 implements HttpAgent {
 
     @Override
     public void shutdown() {
+        executorService.shutdownNow();
         this.mgr.close(CloseMode.GRACEFUL);
     }
 
     @Override
     public Stats execute(final BenchmarkConfig config) throws Exception {
-        this.mgr.setMaxTotal(2000);
-        this.mgr.setDefaultMaxPerRoute(config.getConcurrency());
-        this.mgr.setDefaultSocketConfig(SocketConfig.custom()
-                .setSoTimeout(Timeout.ofMilliseconds(config.getTimeout()))
-                .build());
-
-        final Stats stats = new Stats(config.getRequests(), config.getConcurrency());
-        final WorkerThread[] workers = new WorkerThread[config.getConcurrency()];
-        for (int i = 0; i < workers.length; i++) {
-            workers[i] = new WorkerThread(stats, config);
-        }
-        for (final WorkerThread worker : workers) {
-            worker.start();
-        }
-        for (final WorkerThread worker : workers) {
-            worker.join();
-        }
-        return stats;
-    }
-
-    class WorkerThread extends Thread {
-
-        private final Stats stats;
-        private final BenchmarkConfig config;
-
-        WorkerThread(final Stats stats, final BenchmarkConfig config) {
-            super();
-            this.stats = stats;
-            this.config = config;
-        }
-
-        @Override
-        public void run() {
-            final byte[] buffer = new byte[4096];
-
-            final URI target = config.getUri();
-
-            final HttpHost targetHost = new HttpHost(target.getScheme(), target.getHost(), target.getPort());
-            final RequestConfig requestConfig = RequestConfig.custom()
-                    .setConnectTimeout(Timeout.ofMilliseconds(config.getTimeout()))
-                    .setResponseTimeout(Timeout.ofMilliseconds(config.getTimeout()))
-                    .build();
-
-            while (!this.stats.isComplete()) {
-                final ClassicRequestBuilder requestBuilder;
-                if (config.getFile() == null) {
-                    requestBuilder = ClassicRequestBuilder.get(target);
-                } else {
-                    requestBuilder = ClassicRequestBuilder.put(target)
-                            .setEntity(new FileEntity(
-                                    config.getFile(),
-                                    config.getContentType() != null ? ContentType.parse(config.getContentType()) : null));
+        int concurrency = config.getConcurrency();
+        int requests = config.getRequests();
+        final Stats stats = new Stats(config.getRequests(), concurrency);
+        CyclicBarrier barrier = new CyclicBarrier(concurrency);
+        ExecutorService executorService = Executors.newFixedThreadPool(concurrency);
+        AtomicBoolean leader = new AtomicBoolean(false);
+        AtomicBoolean leakDetected = new AtomicBoolean(false);
+        for (int i = 0; i < requests; i++) {
+            executorService.submit(() -> {
+                if (leakDetected.get()) {
+                    return;
                 }
-                if (!config.isKeepAlive()) {
-                    requestBuilder.addHeader(HttpHeaders.CONNECTION, HeaderElements.CLOSE);
-                }
-
-                final ClassicHttpRequest request = requestBuilder.build();
-                final HttpClientContext clientContext = HttpClientContext.create();
-                clientContext.setRequestConfig(requestConfig);
-
-                long contentLen = 0;
-                try (final CloseableHttpResponse response = httpclient.execute(targetHost, request, clientContext)) {
-                    final HttpEntity entity = response.getEntity();
-                    if (entity != null) {
-                        final InputStream instream = entity.getContent();
-                        contentLen = 0;
-                        if (instream != null) {
-                            try {
-                                int l;
-                                while ((l = instream.read(buffer)) != -1) {
-                                    contentLen += l;
-                                }
-                            } finally {
-                                instream.close();
-                            }
+                try {
+                    barrier.await();
+                    if (leader.getAndSet(false)) {
+                        if (mgr.getTotalStats().toString().contains("leased: 0;")) {
+                            System.out.println("No connection leak detected...");
+                        } else {
+                            System.out.println("Connection leak detected!");
+                            leakDetected.set(true);
                         }
                     }
-                    if (response.getCode() == 200) {
-                        this.stats.success(contentLen);
-                    } else {
-                        this.stats.failure(contentLen);
+                    barrier.await();
+                    leader.set(true);
+                    if (leakDetected.get()) {
+                        return;
                     }
-                } catch (final IOException ex) {
-                    this.stats.failure(contentLen);
+
+                    final URI target = URI.create("http://240.0.0.1:80/");
+
+                    final HttpHost targetHost = new HttpHost(target.getScheme(), target.getHost(), target.getPort());
+                    final RequestConfig requestConfig = RequestConfig.custom()
+                            .setConnectTimeout(Timeout.ofMilliseconds(50))
+                            .setConnectionRequestTimeout(Timeout.ofMilliseconds(50))
+                            .build();
+
+                    final HttpUriRequestBase request = new HttpGet(target);
+                    final HttpClientContext clientContext = HttpClientContext.create();
+                    clientContext.setRequestConfig(requestConfig);
+
+                    try (final CloseableHttpResponse response = httpclient.execute(targetHost, request, clientContext)) {
+                        stats.success(0);
+                    } catch (Throwable t) {
+                        stats.failure(0);
+                    }
+                } catch (Throwable ignore) {
                 }
-            }
+            });
         }
 
+        executorService.shutdown();
+        executorService.awaitTermination(1, TimeUnit.DAYS);
+
+        String poolStats = mgr.getTotalStats().toString();
+        if (poolStats.contains("leased: 0;")) {
+            System.out.println("No connection leak detected.");
+        } else {
+            System.out.println("Connection leak detected");
+            System.out.println(poolStats);
+        }
+        return stats;
     }
 
     @Override
