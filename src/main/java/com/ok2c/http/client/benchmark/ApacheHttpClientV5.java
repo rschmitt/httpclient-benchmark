@@ -84,51 +84,35 @@ public class ApacheHttpClientV5 implements HttpAgent {
         int concurrency = config.getConcurrency();
         int requests = config.getRequests();
         final Stats stats = new Stats(config.getRequests(), concurrency);
-        CyclicBarrier barrier = new CyclicBarrier(concurrency);
-        ExecutorService executorService = Executors.newFixedThreadPool(concurrency);
-        AtomicBoolean leader = new AtomicBoolean(false);
-        AtomicBoolean leakDetected = new AtomicBoolean(false);
+        ScheduledExecutorService executorService = Executors.newSingleThreadScheduledExecutor();
         for (int i = 0; i < requests; i++) {
-            executorService.submit(() -> {
-                if (leakDetected.get()) {
-                    return;
-                }
-                try {
-                    barrier.await();
-                    if (leader.getAndSet(false)) {
-                        if (mgr.getTotalStats().toString().contains("leased: 0;")) {
-                            System.out.println("No connection leak detected...");
-                        } else {
-                            System.out.println("Connection leak detected!");
-                            leakDetected.set(true);
-                        }
-                    }
-                    barrier.await();
-                    leader.set(true);
-                    if (leakDetected.get()) {
-                        return;
-                    }
+            final URI target = URI.create("http://240.0.0.1:80/");
 
-                    final URI target = URI.create("http://240.0.0.1:80/");
+            final HttpHost targetHost = new HttpHost(target.getScheme(), target.getHost(), target.getPort());
+            final RequestConfig requestConfig = RequestConfig.custom()
+                .setConnectTimeout(Timeout.ofMilliseconds(50))
+                .setConnectionRequestTimeout(Timeout.ofMilliseconds(50))
+                .build();
 
-                    final HttpHost targetHost = new HttpHost(target.getScheme(), target.getHost(), target.getPort());
-                    final RequestConfig requestConfig = RequestConfig.custom()
-                            .setConnectTimeout(Timeout.ofMilliseconds(50))
-                            .setConnectionRequestTimeout(Timeout.ofMilliseconds(50))
-                            .build();
+            final HttpUriRequestBase request = new HttpGet(target);
+            final HttpClientContext clientContext = HttpClientContext.create();
+            clientContext.setRequestConfig(requestConfig);
 
-                    final HttpUriRequestBase request = new HttpGet(target);
-                    final HttpClientContext clientContext = HttpClientContext.create();
-                    clientContext.setRequestConfig(requestConfig);
+            executorService.schedule(request::cancel, i, TimeUnit.MILLISECONDS);
 
-                    try (final CloseableHttpResponse response = httpclient.execute(targetHost, request, clientContext)) {
-                        stats.success(0);
-                    } catch (Throwable t) {
-                        stats.failure(0);
-                    }
-                } catch (Throwable ignore) {
-                }
-            });
+            try (final CloseableHttpResponse response = httpclient.execute(targetHost, request, clientContext)) {
+                stats.success(0);
+            } catch (Throwable t) {
+                stats.failure(0);
+            }
+
+            String s = mgr.getTotalStats().toString();
+            if (s.contains("leased: 0;")) {
+                System.out.println("No connection leak detected...");
+            } else {
+                System.out.println("Connection leak detected! " + s);
+                break;
+            }
         }
 
         executorService.shutdown();
